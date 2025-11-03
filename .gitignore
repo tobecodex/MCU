@@ -1,0 +1,45 @@
+# Build directories
+build/
+dist/
+*.egg-info/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.so
+
+# ESP-IDF
+sdkconfig
+sdkconfig.old
+dependencies.lock
+
+# PlatformIO
+.pio/
+.vscode/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Compiled
+*.o
+*.elf
+*.bin
+*.hex
+*.uf2
+
+# Temporary
+*.tmp
+*.bak
