@@ -1,0 +1,9 @@
+/.pio
+/.pioenvs
+/.vscode/.history
+/.vs
+/build
+*.bin
+*.elf
+*.hex
+*.dfu

@@ -2,16 +2,25 @@
 
 > **Inherits from**: `../../.github/copilot-instructions.md` (General development practices)
 
-## Toolchain
-- Use `idf.py` (not PlatformIO), Makefile builds preferred
-- Check tool installation before installing (`which`, `command -v`)
-- Verify builds succeed before flash (check for `*.bin` files)
-- Use background tasks for long operations (`isBackground=true`)
+## ESP-IDF Installation
+
+**ESP-IDF Location:** `~/.esp/v6.0/esp-idf`
+
+## Build System
+
+**CRITICAL: ALWAYS use the project Makefile, NEVER run `idf.py` directly.**
+
+The Makefile handles ESP-IDF environment setup automatically.
+
+Standard commands:
+- `make build` - Build firmware
+- `make flash` - Flash to device
+- `make monitor` - Monitor serial output
+- `make clean` - Clean build artifacts
 
 ## ESP-IDF Patterns
 
 ### Build & Config
-- Commands: `idf.py build/flash/monitor/menuconfig`
 - `sdkconfig` for build config, NVS for runtime
 - `main/` for app code, `components/` for reusable modules
 
@@ -31,5 +40,4 @@
 
 ### Power & Debug
 - Sleep: `esp_deep_sleep_start()`, `esp_light_sleep_start()`
-- Monitor: `idf.py monitor -b 921600`
-- Memory: `esp_get_free_heap_size()`, size: `idf.py size`
+- Monitor at 921600 baud

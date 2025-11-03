@@ -2,6 +2,13 @@
 
 > **Inherits from**: `../.github/copilot-instructions.md` (ESP32 development patterns)
 
+## Project Goal
+**Build a simple Meshtastic mesh repeater node** - A minimal working device that can receive and relay LoRa mesh packets. This is a learning project focusing on fundamentals before adding custom features.
+
+**Current Status:** Early development - basic infrastructure works (display, tasks) but radio communication needs implementation.
+
+**Next Priority:** Get LoRa radio receiving and transmitting packets, then implement basic message relay logic.
+
 ## Project Overview
 This is a Meshtastic ESP32 firmware project that implements mesh networking capabilities for LoRa devices. Uses ESP-IDF framework with Makefile-based toolchain.
 
