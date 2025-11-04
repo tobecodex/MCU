@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <inttypes.h>
+#include <string.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_system.h"
@@ -82,6 +83,36 @@ void radio_receive_task(void* param) {
     }
 }
 
+void send_task(void* param) {
+    // Periodically send a simple Meshtastic "Hello" message
+    vTaskDelay(pdMS_TO_TICKS(5000)); // wait for radio/display init
+
+    uint32_t send_count = 0;
+    while (1) {
+        char payload[64];
+        snprintf(payload, sizeof(payload), "Hello Meshtastic #%" PRIu32, send_count++);
+
+        mesh_packet_t packet = {};
+        packet.from = 0;                 // let network assign or use 0
+        packet.to = 0xFFFFFFFF;          // broadcast
+        packet.want_ack = 0;
+        packet.hop_limit = 3;
+        packet.payload = (uint8_t*)payload;
+        packet.payload_len = (uint16_t)strlen(payload);
+
+        ESP_LOGI(TAG, "Sending hello packet #%" PRIu32 ", len=%u", send_count, packet.payload_len);
+        radio.transmit(&packet);
+
+        // Flash LED briefly to indicate send
+        gpio_set_level(LED_PIN, 1);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(LED_PIN, 0);
+
+        // Send every 60 seconds
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
 void mesh_task(void* param) {
     // Main mesh networking task
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -142,6 +173,9 @@ extern "C" void app_main() {
 
     // Start radio receive task to log incoming messages
     xTaskCreate(radio_receive_task, "radio_rx", 4096, NULL, 5, NULL);  // Increased stack for display calls
+
+    // Start periodic send task (Hello world)
+    xTaskCreate(send_task, "sender", 4096, NULL, 5, NULL);
 
     // Start main mesh task
     xTaskCreate(mesh_task, "mesh", 4096, NULL, 5, NULL);  // Increased stack for display calls

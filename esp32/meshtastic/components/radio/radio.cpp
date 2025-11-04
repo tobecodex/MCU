@@ -199,10 +199,61 @@ void RadioInterface::transmit(const mesh_packet_t* packet) {
         return;
     }
 
-    ESP_LOGI(TAG, "TX: from=0x%x to=0x%x len=%u rssi=%d snr=%d",
-             packet->from, packet->to, packet->payload_len, packet->rssi, packet->snr);
+    ESP_LOGI(TAG, "TX: from=0x%08x to=0x%08x len=%u", packet->from, packet->to, packet->payload_len);
 
-    // TODO: Implement LoRa packet transmission
+    // Build TX buffer: [from(4)][to(4)][payload...]
+    uint8_t tx_buf[256];
+    if (packet->payload_len + 8 > sizeof(tx_buf)) {
+        ESP_LOGW(TAG, "Payload too large to transmit: %u bytes", packet->payload_len);
+        return;
+    }
+
+    // Fill header
+    tx_buf[0] = (packet->from >> 24) & 0xFF;
+    tx_buf[1] = (packet->from >> 16) & 0xFF;
+    tx_buf[2] = (packet->from >> 8) & 0xFF;
+    tx_buf[3] = (packet->from) & 0xFF;
+    tx_buf[4] = (packet->to >> 24) & 0xFF;
+    tx_buf[5] = (packet->to >> 16) & 0xFF;
+    tx_buf[6] = (packet->to >> 8) & 0xFF;
+    tx_buf[7] = (packet->to) & 0xFF;
+
+    if (packet->payload_len > 0 && packet->payload != nullptr) {
+        memcpy(&tx_buf[8], packet->payload, packet->payload_len);
+    }
+
+    // Write data to radio buffer at offset 0
+    // SX1262 WRITE_BUFFER expects [offset][data...]
+    uint8_t write_buf[257];
+    write_buf[0] = 0x00; // offset
+    memcpy(&write_buf[1], tx_buf, packet->payload_len + 8);
+    spiWrite(SX1262_CMD_WRITE_BUFFER, write_buf, packet->payload_len + 1 + 8 - 1); // len: offset + header+payload
+
+    // Set TX with timeout (simple ms value)
+    uint32_t timeout_ms = 1000;
+    uint8_t tbuf[3];
+    tbuf[0] = (timeout_ms >> 16) & 0xFF;
+    tbuf[1] = (timeout_ms >> 8) & 0xFF;
+    tbuf[2] = timeout_ms & 0xFF;
+    spiWrite(SX1262_CMD_SET_TX, tbuf, 3);
+
+    // Wait for TX_DONE or timeout
+    uint32_t wait = 0;
+    while (wait < 5000) { // up to ~5s
+        uint16_t irq = getIrqStatus();
+        if (irq & SX1262_IRQ_TX_DONE) {
+            clearIrqStatus(SX1262_IRQ_TX_DONE);
+            ESP_LOGI(TAG, "TX done");
+            break;
+        }
+        if (irq & (SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR)) {
+            clearIrqStatus(SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR);
+            ESP_LOGW(TAG, "TX reported error/timeout (irq=0x%04x)", irq);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+        wait += 10;
+    }
 }
 
 void RadioInterface::startReceiving() {
