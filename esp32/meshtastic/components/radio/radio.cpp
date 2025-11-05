@@ -1,4 +1,5 @@
 #include "radio.h"
+#include "sx1262_defs.h"
 #include "esp_log.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
@@ -9,74 +10,6 @@
 #include "../../main/variant/heltec/variant.h"
 
 static const char* TAG = "Radio";
-
-// SX1262 command opcodes
-#define SX1262_CMD_SET_SLEEP              0x84
-#define SX1262_CMD_SET_STANDBY            0x80
-#define SX1262_CMD_SET_FS                 0xC1
-#define SX1262_CMD_SET_TX                 0x83
-#define SX1262_CMD_SET_RX                 0x82
-#define SX1262_CMD_SET_RXDUTYCYCLE        0x94
-#define SX1262_CMD_SET_CAD                0xC5
-#define SX1262_CMD_SET_TXCONTINUOUSWAVE   0xD1
-#define SX1262_CMD_SET_TXCONTINUOUSPREAMBLE 0xD2
-#define SX1262_CMD_SET_PACKETTYPE         0x8A
-#define SX1262_CMD_GET_PACKETTYPE         0x11
-#define SX1262_CMD_SET_RFFREQUENCY        0x86
-#define SX1262_CMD_SET_TXPARAMS           0x8E
-#define SX1262_CMD_SET_PACONFIG           0x95
-#define SX1262_CMD_SET_CADPARAMS          0x88
-#define SX1262_CMD_SET_BUFFERBASEADDRESS  0x8F
-#define SX1262_CMD_SET_MODULATIONPARAMS   0x8B
-#define SX1262_CMD_SET_PACKETPARAMS       0x8C
-#define SX1262_CMD_GET_RXBUFFERSTATUS     0x13
-#define SX1262_CMD_GET_PACKETSTATUS       0x14
-#define SX1262_CMD_GET_RSSIINST           0x15
-#define SX1262_CMD_GET_STATS              0x10
-#define SX1262_CMD_RESET_STATS            0x00
-#define SX1262_CMD_CFG_DIOIRQ             0x08
-#define SX1262_CMD_GET_IRQSTATUS          0x12
-#define SX1262_CMD_CLR_IRQSTATUS          0x02
-#define SX1262_CMD_CALIBRATE              0x89
-#define SX1262_CMD_CALIBRATEIMAGE         0x98
-#define SX1262_CMD_SET_REGULATORMODE      0x96
-#define SX1262_CMD_GET_ERROR              0x17
-#define SX1262_CMD_CLR_ERROR              0x07
-#define SX1262_CMD_SET_TCXOMODE           0x97
-#define SX1262_CMD_SET_TXFALLBACKMODE     0x93
-#define SX1262_CMD_SET_RFSWITCHMODE       0x9D
-#define SX1262_CMD_SET_STOPRXTIMERONPREAMBLE 0x9F
-#define SX1262_CMD_SET_LORASYMBTIMEOUT    0xA0
-#define SX1262_CMD_GET_STATUS             0xC0
-#define SX1262_CMD_WRITE_REGISTER         0x0D
-#define SX1262_CMD_READ_REGISTER          0x1D
-#define SX1262_CMD_WRITE_BUFFER           0x0E
-#define SX1262_CMD_READ_BUFFER            0x1E
-
-// Packet types
-#define SX1262_PACKET_TYPE_GFSK           0x00
-#define SX1262_PACKET_TYPE_LORA           0x01
-
-// Standby modes
-#define SX1262_STANDBY_RC                 0x00
-#define SX1262_STANDBY_XOSC               0x01
-
-// Regulator modes
-#define SX1262_REGULATOR_LDO              0x00
-#define SX1262_REGULATOR_DC_DC            0x01
-
-// IRQ masks
-#define SX1262_IRQ_TX_DONE                0x0001
-#define SX1262_IRQ_RX_DONE                0x0002
-#define SX1262_IRQ_PREAMBLE_DETECTED      0x0004
-#define SX1262_IRQ_SYNC_WORD_VALID        0x0008
-#define SX1262_IRQ_HEADER_VALID           0x0010
-#define SX1262_IRQ_HEADER_ERROR           0x0020
-#define SX1262_IRQ_CRC_ERROR              0x0040
-#define SX1262_IRQ_CAD_DONE               0x0080
-#define SX1262_IRQ_CAD_DETECTED           0x0100
-#define SX1262_IRQ_TIMEOUT                0x0200
-#define SX1262_IRQ_ALL                    0x03FF
 
 RadioInterface::RadioInterface() {}
 RadioInterface::~RadioInterface() {}
@@ -92,6 +25,14 @@ void RadioInterface::init() {
     ESP_LOGI(TAG, "Initializing SX1262 LoRa radio (Heltec V3)");
     ESP_LOGI(TAG, "Frequency: %u Hz (%.1f MHz)", _frequency, _frequency / 1e6f);
     ESP_LOGI(TAG, "TX Power: %d dBm", _txPower);
+
+    // Create SPI mutex for thread-safe access
+    _spi_mutex = xSemaphoreCreateMutex();
+    if (!_spi_mutex) {
+        ESP_LOGE(TAG, "Failed to create SPI mutex!");
+        return;
+    }
+    ESP_LOGI(TAG, "SPI mutex created successfully");
 
     // Configure GPIO for RST and BUSY pins
     gpio_config_t io_conf = {};
@@ -134,6 +75,13 @@ void RadioInterface::init() {
     ESP_LOGI(TAG, "GPIO configured: RST=%d BUSY=%d IRQ=%d", 
              LORA_RST, LORA_BUSY, LORA_IRQ);
 
+    // Create mutex for SPI access protection
+    _spi_mutex = xSemaphoreCreateMutex();
+    if (_spi_mutex == nullptr) {
+        ESP_LOGE(TAG, "Failed to create SPI mutex");
+        return;
+    }
+
     // Initialize SX1262 chip
     reset();
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -161,9 +109,9 @@ void RadioInterface::init() {
     // Set buffer base addresses
     setBufferBaseAddress(0x00, 0x00);
     
-    // Configure DIO1 for RX done interrupt
-    setDioIrqParams(SX1262_IRQ_RX_DONE | SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR,
-                    SX1262_IRQ_RX_DONE | SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR,
+    // Configure DIO1 for TX and RX interrupts
+    setDioIrqParams(SX1262_IRQ_TX_DONE | SX1262_IRQ_RX_DONE | SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR,
+                    SX1262_IRQ_TX_DONE | SX1262_IRQ_RX_DONE | SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR,
                     0x0000, 0x0000);
     
     // Configure GPIO interrupt for DIO1
@@ -227,7 +175,11 @@ void RadioInterface::transmit(const mesh_packet_t* packet) {
     uint8_t write_buf[257];
     write_buf[0] = 0x00; // offset
     memcpy(&write_buf[1], tx_buf, packet->payload_len + 8);
-    spiWrite(SX1262_CMD_WRITE_BUFFER, write_buf, packet->payload_len + 1 + 8 - 1); // len: offset + header+payload
+    // len should include offset byte + header + payload
+    spiWrite(SX1262_CMD_WRITE_BUFFER, write_buf, 1 + 8 + packet->payload_len);
+
+    // Clear any pending IRQs before starting TX
+    clearIrqStatus(0xFFFF);
 
     // Set TX with timeout (simple ms value)
     uint32_t timeout_ms = 1000;
@@ -254,6 +206,13 @@ void RadioInterface::transmit(const mesh_packet_t* packet) {
         vTaskDelay(pdMS_TO_TICKS(10));
         wait += 10;
     }
+    
+    if (wait >= 5000) {
+        ESP_LOGW(TAG, "TX wait timeout - no IRQ received after 5s");
+    }
+
+    // Return to RX continuous mode after TX
+    startReceiving();
 }
 
 void RadioInterface::startReceiving() {
@@ -262,7 +221,12 @@ void RadioInterface::startReceiving() {
         return;
     }
 
-    ESP_LOGI(TAG, "Starting RX continuous mode");
+    // Only log on first call or after TX - avoid spam during continuous polling
+    static bool first_call = true;
+    if (first_call) {
+        ESP_LOGI(TAG, "Starting RX continuous mode");
+        first_call = false;
+    }
     
     // Clear any pending IRQs
     clearIrqStatus(SX1262_IRQ_ALL);
@@ -348,6 +312,11 @@ void RadioInterface::waitOnBusy() {
 }
 
 void RadioInterface::spiWrite(uint8_t cmd, const uint8_t* data, uint8_t len) {
+    if (!_spi_mutex || xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to acquire SPI mutex for write");
+        return;
+    }
+    
     waitOnBusy();
     
     spi_transaction_t t = {};
@@ -363,9 +332,16 @@ void RadioInterface::spiWrite(uint8_t cmd, const uint8_t* data, uint8_t len) {
     t.rx_buffer = nullptr;
     
     ESP_ERROR_CHECK(spi_device_transmit(_spi, &t));
+    
+    xSemaphoreGive(_spi_mutex);
 }
 
 void RadioInterface::spiRead(uint8_t cmd, uint8_t* data, uint8_t len) {
+    if (!_spi_mutex || xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to acquire SPI mutex for read");
+        return;
+    }
+    
     waitOnBusy();
     
     spi_transaction_t t = {};
@@ -383,6 +359,8 @@ void RadioInterface::spiRead(uint8_t cmd, uint8_t* data, uint8_t len) {
     if (data && len > 0) {
         memcpy(data, &rx_buffer[1], len);
     }
+    
+    xSemaphoreGive(_spi_mutex);
 }
 
 void RadioInterface::reset() {

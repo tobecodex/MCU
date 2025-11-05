@@ -7,6 +7,7 @@
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "version.h"
 #include "driver/gpio.h"
 
 // Components
@@ -41,7 +42,6 @@ void radio_receive_task(void* param) {
 
     ESP_LOGI(TAG, "Radio RX task started");
     ESP_LOGI(TAG, "Frequency: %u Hz, Power: %d dBm", radio.getFrequency(), radio.getTxPower());
-    display.showStatus("RX: Listening...");
     
     // Start receiving
     radio.startReceiving();
@@ -53,8 +53,8 @@ void radio_receive_task(void* param) {
     while (1) {
         check_count++;
         
-        // Log every 100 checks (10 seconds) to show we're alive
-        if (check_count % 100 == 0) {
+        // Log every 200 checks (20 seconds) to show we're alive
+        if (check_count % 200 == 0) {
             ESP_LOGI(TAG, "Radio listening... checked %u times, received %u packets", 
                      check_count, packet_count);
         }
@@ -70,13 +70,6 @@ void radio_receive_task(void* param) {
             char msg[32];
             snprintf(msg, sizeof(msg), "RX-%" PRIu32 " RSSI:%ddBm", packet_count, packet.rssi);
             display.showMessage(msg);
-            
-            // Flash LED briefly on packet receive
-            gpio_set_level(LED_PIN, 1);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            gpio_set_level(LED_PIN, 0);
-            
-            // TODO: Implement relay logic here
         }
         
         vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100ms
@@ -88,12 +81,24 @@ void send_task(void* param) {
     vTaskDelay(pdMS_TO_TICKS(5000)); // wait for radio/display init
 
     uint32_t send_count = 0;
+    uint8_t mac_local[6] = {0};
+    esp_read_mac(mac_local, ESP_MAC_WIFI_STA);
+    
+    // Use last 4 bytes of MAC as node ID for uniqueness
+    uint32_t node_id = ((uint32_t)mac_local[2] << 24) | 
+                       ((uint32_t)mac_local[3] << 16) | 
+                       ((uint32_t)mac_local[4] << 8) | 
+                       ((uint32_t)mac_local[5]);
+    
+    ESP_LOGI(TAG, "Node ID: 0x%08x (from MAC)", node_id);
+    
     while (1) {
         char payload[64];
-        snprintf(payload, sizeof(payload), "Hello Meshtastic #%" PRIu32, send_count++);
+        snprintf(payload, sizeof(payload), "Hello %02x%02x #%" PRIu32,
+                 mac_local[4], mac_local[5], send_count++);
 
         mesh_packet_t packet = {};
-        packet.from = 0;                 // let network assign or use 0
+        packet.from = node_id;           // Use unique node ID
         packet.to = 0xFFFFFFFF;          // broadcast
         packet.want_ack = 0;
         packet.hop_limit = 3;
@@ -103,27 +108,8 @@ void send_task(void* param) {
         ESP_LOGI(TAG, "Sending hello packet #%" PRIu32 ", len=%u", send_count, packet.payload_len);
         radio.transmit(&packet);
 
-        // Flash LED briefly to indicate send
-        gpio_set_level(LED_PIN, 1);
-        vTaskDelay(pdMS_TO_TICKS(50));
-        gpio_set_level(LED_PIN, 0);
-
-        // Send every 60 seconds
-        vTaskDelay(pdMS_TO_TICKS(60000));
-    }
-}
-
-void mesh_task(void* param) {
-    // Main mesh networking task
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    ESP_LOGI(TAG, "Mesh task started");
-    
-    while (1) {
-        // Simple listening indicator
-        display.showStatus("Listening...");
-        
-        vTaskDelay(pdMS_TO_TICKS(5000));  // Update every 5 seconds
+        // Send every 15 seconds
+        vTaskDelay(pdMS_TO_TICKS(15000));
     }
 }
 
@@ -131,6 +117,7 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Meshtastic Node - Heltec V3");
     ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Firmware: %s (Built %s %s)", FW_VERSION, FW_BUILD_DATE, FW_BUILD_TIME);
 
     // Initialize NVS (Non-Volatile Storage)
     esp_err_t ret = nvs_flash_init();
@@ -168,19 +155,24 @@ extern "C" void app_main() {
     uint32_t heap_free = esp_get_free_heap_size();
     ESP_LOGI(TAG, "Free heap: %u bytes", heap_free);
 
-    // Start LED blink task (indicates system running)
-    xTaskCreate(blink_task, "blink", 2048, NULL, 1, NULL);  // Increased stack size
+    // Ensure LED is off (no blinking/feedback)
+    {
+        gpio_config_t gpio_conf = {};
+        gpio_conf.pin_bit_mask = (1ULL << LED_PIN);
+        gpio_conf.mode = GPIO_MODE_OUTPUT;
+        gpio_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+        gpio_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        gpio_conf.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&gpio_conf);
+        gpio_set_level(LED_PIN, 0);
+    }
 
     // Start radio receive task to log incoming messages
-    xTaskCreate(radio_receive_task, "radio_rx", 4096, NULL, 5, NULL);  // Increased stack for display calls
+    xTaskCreate(radio_receive_task, "radio_rx", 4096, NULL, 5, NULL);
 
     // Start periodic send task (Hello world)
     xTaskCreate(send_task, "sender", 4096, NULL, 5, NULL);
 
-    // Start main mesh task
-    xTaskCreate(mesh_task, "mesh", 4096, NULL, 5, NULL);  // Increased stack for display calls
-
-    display.showStatus("Boot: Complete");
     ESP_LOGI(TAG, "Meshtastic node ready - waiting for mesh messages...");
     
     // Keep main task alive

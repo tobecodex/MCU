@@ -59,6 +59,7 @@ private:
     bool _initialized = false;
     
     spi_device_handle_t _spi = nullptr;
+    SemaphoreHandle_t _spi_mutex = nullptr;  // Protect SPI access from multiple tasks
 };
 
 extern RadioInterface& radio;
