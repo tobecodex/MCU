@@ -119,6 +119,9 @@ extern "C" void app_main() {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Firmware: %s (Built %s %s)", FW_VERSION, FW_BUILD_DATE, FW_BUILD_TIME);
 
+    // Enable DEBUG logging for Radio component
+    esp_log_level_set("Radio", ESP_LOG_DEBUG);
+
     // Initialize NVS (Non-Volatile Storage)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

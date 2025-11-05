@@ -180,6 +180,8 @@ void RadioInterface::transmit(const mesh_packet_t* packet) {
 
     // Clear any pending IRQs before starting TX
     clearIrqStatus(0xFFFF);
+    
+    ESP_LOGD(TAG, "Starting TX: payload_len=%u, total_len=%u", packet->payload_len, 8 + packet->payload_len);
 
     // Set TX with timeout (simple ms value)
     uint32_t timeout_ms = 1000;
@@ -191,16 +193,22 @@ void RadioInterface::transmit(const mesh_packet_t* packet) {
 
     // Wait for TX_DONE or timeout
     uint32_t wait = 0;
+    uint16_t last_irq = 0;
     while (wait < 5000) { // up to ~5s
         uint16_t irq = getIrqStatus();
+        if (irq != last_irq && irq != 0) {
+            ESP_LOGD(TAG, "TX IRQ status: 0x%04x at %ums", irq, wait);
+            last_irq = irq;
+        }
         if (irq & SX1262_IRQ_TX_DONE) {
             clearIrqStatus(SX1262_IRQ_TX_DONE);
-            ESP_LOGI(TAG, "TX done");
+            ESP_LOGI(TAG, "TX done (irq=0x%04x after %ums)", irq, wait);
             break;
         }
         if (irq & (SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR)) {
             clearIrqStatus(SX1262_IRQ_TIMEOUT | SX1262_IRQ_CRC_ERROR);
-            ESP_LOGW(TAG, "TX reported error/timeout (irq=0x%04x)", irq);
+            ESP_LOGW(TAG, "TX reported error/timeout (irq=0x%04x after %ums)", irq, wait);
+            // Continue anyway - the packet might have been sent
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -250,6 +258,16 @@ bool RadioInterface::checkForPacket(mesh_packet_t* packet) {
     
     // Check IRQ status
     uint16_t irq = getIrqStatus();
+    
+    // Log any non-zero IRQ for debugging
+    static uint16_t last_logged_irq = 0;
+    static uint32_t irq_check_count = 0;
+    irq_check_count++;
+    
+    if (irq != 0 && irq != last_logged_irq) {
+        ESP_LOGD(TAG, "RX IRQ status: 0x%04x (check #%u)", irq, irq_check_count);
+        last_logged_irq = irq;
+    }
     
     if (irq & SX1262_IRQ_RX_DONE) {
         // Clear IRQ
@@ -348,16 +366,20 @@ void RadioInterface::spiRead(uint8_t cmd, uint8_t* data, uint8_t len) {
     uint8_t tx_buffer[256] = {0};
     uint8_t rx_buffer[256] = {0};
     
+    // SX1262 read commands require: [CMD] [NOP] -> [STATUS] [STATUS] [DATA...]
+    // We need to skip the first 2 status bytes in the response
     tx_buffer[0] = cmd;
+    tx_buffer[1] = 0x00;  // NOP byte
     
-    t.length = (1 + len) * 8;  // bits
+    t.length = (2 + len) * 8;  // bits: cmd + nop + data length
     t.tx_buffer = tx_buffer;
     t.rx_buffer = rx_buffer;
     
     ESP_ERROR_CHECK(spi_device_transmit(_spi, &t));
     
     if (data && len > 0) {
-        memcpy(data, &rx_buffer[1], len);
+        // Skip first 2 bytes (status bytes), copy the actual data
+        memcpy(data, &rx_buffer[2], len);
     }
     
     xSemaphoreGive(_spi_mutex);
@@ -516,9 +538,51 @@ void RadioInterface::getPacketStatus(int8_t* rssi, int8_t* snr) {
 }
 
 uint16_t RadioInterface::getIrqStatus() {
-    uint8_t status[2];
-    spiRead(SX1262_CMD_GET_IRQSTATUS, status, 2);
-    return (status[0] << 8) | status[1];
+    // SX1262 GET_IRQSTATUS: send [CMD][NOP], receive [STATUS][IRQ_MSB][IRQ_LSB]
+    // According to datasheet we need NOP byte
+    waitOnBusy();
+    
+    spi_transaction_t t = {};
+    uint8_t tx_buffer[4] = {SX1262_CMD_GET_IRQSTATUS, 0x00, 0x00, 0x00};
+    uint8_t rx_buffer[4] = {0};
+    
+    t.length = 4 * 8;  // 4 bytes to be safe
+    t.tx_buffer = tx_buffer;
+    t.rx_buffer = rx_buffer;
+    
+    if (!_spi_mutex || xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to acquire SPI mutex for IRQ status");
+        return 0;
+    }
+    
+    ESP_ERROR_CHECK(spi_device_transmit(_spi, &t));
+    
+    xSemaphoreGive(_spi_mutex);
+    
+    // Debug: log all bytes received
+    static bool first_time = true;
+    if (first_time) {
+        ESP_LOGI(TAG, "IRQ raw RX bytes: [0]=0x%02x [1]=0x%02x [2]=0x%02x [3]=0x%02x", 
+                 rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3]);
+        first_time = false;
+    }
+    
+    // rx_buffer[0] = status, rx_buffer[1] = status, rx_buffer[2] = IRQ LSB?, rx_buffer[3] = IRQ MSB?
+    // Try LSB first based on actual data
+    uint16_t irq = (rx_buffer[3] << 8) | rx_buffer[2];
+    
+    // Log IRQ bits for debugging (only if non-zero)
+    static uint16_t last_nonzero_irq = 0;
+    if (irq != 0 && irq != last_nonzero_irq) {
+        ESP_LOGI(TAG, "IRQ status: 0x%04x (TX_DONE=%d RX_DONE=%d TIMEOUT=%d)", 
+                 irq,
+                 (irq & SX1262_IRQ_TX_DONE) ? 1 : 0,
+                 (irq & SX1262_IRQ_RX_DONE) ? 1 : 0,
+                 (irq & SX1262_IRQ_TIMEOUT) ? 1 : 0);
+        last_nonzero_irq = irq;
+    }
+    
+    return irq;
 }
 
 void RadioInterface::clearIrqStatus(uint16_t irq) {
